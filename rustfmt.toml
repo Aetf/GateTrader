@@ -1,5 +1,2 @@
 edition = "2018"
 max_width = 120
-ignore = [
-    "desim",
-]

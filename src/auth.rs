@@ -1,14 +1,12 @@
 use std::borrow::Cow;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use hmac::{Hmac, NewMac, Mac};
+use hmac::digest::Digest;
+use hmac::{Hmac, Mac, NewMac};
 use percent_encoding::percent_decode_str;
 use sha2::Sha512;
-use surf::{Body, Client, Error as SurfError, Request, Response, Result as SurfResult};
 use surf::middleware::{Middleware, Next};
-use hmac::digest::Digest;
-
-type HmacSha512 = Hmac<Sha512>;
+use surf::{Body, Client, Error as SurfError, Request, Response, Result as SurfResult};
 
 pub struct GateIoAuth {
     key: String,
@@ -32,7 +30,7 @@ impl GateIoAuth {
         req.set_header("Timestamp", format!("{}", timestamp));
         // 3. SIGN header
         let sign = {
-            let mut mac = HmacSha512::new_from_slice(&self.secret).expect("HMAC can take key of any size");
+            let mut mac = Hmac::<Sha512>::new_from_slice(&self.secret).expect("HMAC can take key of any size");
 
             // method, all upper case
             let method = req.method().as_ref().to_uppercase().into_bytes();
@@ -106,7 +104,8 @@ mod test {
 
         let req = Request::builder(
             Method::Get,
-            Url::parse("https://api.gateio.ws/api/v4/futures/orders?contract=BTC_USD&status=finished&limit=50").unwrap(),
+            Url::parse("https://api.gateio.ws/api/v4/futures/orders?contract=BTC_USD&status=finished&limit=50")
+                .unwrap(),
         )
         .build();
         let req = auth.sign(req, timestamp).await.unwrap();
@@ -129,8 +128,8 @@ mod test {
             Method::Post,
             Url::parse("https://api.gateio.ws/api/v4/futures/orders").unwrap(),
         )
-            .body(r#"{"contract":"BTC_USD","type":"limit","size":100,"price":6800,"time_in_force":"gtc"}"#)
-            .build();
+        .body(r#"{"contract":"BTC_USD","type":"limit","size":100,"price":6800,"time_in_force":"gtc"}"#)
+        .build();
         let req = auth.sign(req, timestamp).await.unwrap();
 
         assert_eq!(req.header("KEY").unwrap(), key);

@@ -13,9 +13,7 @@ async fn main() -> Result<(), anyhow::Error> {
         "ced122bd871e07a142265503ff84118737341bc07717c784e9e4d167a2e25699",
     ));
     // client.set_base_url(Url::parse("https://api.gateio.ws/api/v4")?);
-    client.set_base_url(Url::parse(
-        "https://ensp73vvqpsjx8g.m.pipedream.net/api/v4",
-    )?);
+    client.set_base_url(Url::parse("https://ensp73vvqpsjx8g.m.pipedream.net/api/v4")?);
     let resp = client
         .get("/futures/orders")
         .await
