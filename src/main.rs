@@ -1,18 +1,21 @@
 #![feature(try_blocks)]
 
+use std::sync::Arc;
+
 use anyhow::{anyhow, Context, Result};
 use async_channel::Sender;
 use async_std::task;
 use async_std::task::JoinHandle;
 use async_tungstenite::async_std as async_ws;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers};
+use futures_util::lock::Mutex;
 use futures_util::sink::SinkExt as _;
-use futures_util::stream::StreamExt as _;
+use futures_util::stream::{self, StreamExt as _};
 use futures_util::TryStreamExt;
 use rust_decimal::Decimal;
 use structopt::clap::AppSettings;
 use structopt::StructOpt;
-use surf::{Client, Url};
+use surf::{Body, Client, Url};
 
 use auth::GateIoAuth;
 use rest::{CurrencyPair, Order, SpotAccount, SpotOrderParams, SpotTicker, SpotTickersParams};
@@ -30,6 +33,7 @@ struct Trader {
     ws_tx: Sender<WsRequest>,
     rest_client: Client,
     dispatcher: Dispatcher,
+    trading_pairs: Arc<Mutex<Vec<(String, String)>>>,
 }
 
 impl Trader {
@@ -110,6 +114,7 @@ impl Trader {
             rest_client: client,
             ws_tx,
             dispatcher,
+            trading_pairs: Arc::new(Mutex::new(vec![])),
         })
     }
 
@@ -119,6 +124,7 @@ impl Trader {
         print_help();
 
         let client = self.rest_client.clone();
+        let pairs = self.trading_pairs.clone();
 
         let fut = async move {
             while let Some(e) = reader.next().await {
@@ -135,6 +141,12 @@ impl Trader {
                             ..
                         }) => {
                             print_balance(client.clone()).await?;
+                        }
+                        Event::Key(KeyEvent {
+                            code: KeyCode::Char('s'),
+                            ..
+                        }) => {
+                            sell_all_pairs(client.clone(), pairs.clone()).await?;
                         }
                         Event::Key(
                             KeyEvent { code: KeyCode::Esc, .. }
@@ -162,6 +174,8 @@ impl Trader {
     pub async fn trade(&mut self, src: impl Into<String>, dst: impl Into<String>) -> Result<()> {
         let src = src.into();
         let dst = dst.into();
+        self.trading_pairs.lock().await.push((src.clone(), dst.clone()));
+
         let rest_client = self.rest_client.clone();
 
         // check basic info about the currency pair
@@ -217,6 +231,7 @@ impl Trader {
                 payload: Default::default(),
             })
             .await?;
+
         Ok(())
     }
 
@@ -248,8 +263,57 @@ async fn print_balance(client: Client) -> Result<()> {
     Ok(())
 }
 
+async fn sell_all_pairs(client: Client, pairs: Arc<Mutex<Vec<(String, String)>>>) -> Result<()> {
+    // these are what we have
+    let accounts: Vec<SpotAccount> = client
+        .get("spot/accounts")
+        .await
+        .map_err(|e| anyhow!(e))?
+        .body_json()
+        .await
+        .map_err(|e| anyhow!(e))?;
+
+    let pairs = pairs.lock().await;
+    // cross reference the pairs with funds we have
+    let pairs = accounts.into_iter().filter_map(|acc| {
+        pairs
+            .iter()
+            .find(|(src, _)| src == &acc.currency && acc.available > 0.into())
+            .map(|(src, dst)| (src, dst, acc.available))
+    });
+    let mut infos = stream::iter(pairs)
+        .then(|(src, dst, amount)| {
+            let url = format!("spot/currency_pairs/{}_{}", src, dst);
+            let client = client.clone();
+            async move {
+                let res: Result<_> = try {
+                    let info: rest::CurrencyPair = client
+                        .get(url)
+                        .await
+                        .map_err(|e| anyhow!(e))?
+                        .body_json()
+                        .await
+                        .map_err(|e| anyhow!(e))?;
+                    (amount, info)
+                };
+                res
+            }
+        })
+        .boxed();
+
+    for pair in infos.next().await {
+        let (amount, info) = pair?;
+        sell(client.clone(), amount, info).await?;
+    }
+
+    Ok(())
+}
+
 async fn sell(client: Client, amount: Decimal, info: CurrencyPair) -> Result<()> {
     // no need to trade if we don't have fund
+    if amount <= 0.into() {
+        return Ok(());
+    }
     if let Some(min_base) = info.min_base_amount {
         if amount < min_base {
             return Ok(());
@@ -280,27 +344,29 @@ async fn sell(client: Client, amount: Decimal, info: CurrencyPair) -> Result<()>
         }
     }
     let order: Order = client
-        .get("spot/orders")
-        .query(&SpotOrderParams {
-            text: None,
-            currency_pair: &info.id,
-            order_type: Some("limit".into()),
-            account: Some("spot".into()),
-            side: "sell".into(),
-            amount,
-            price,
-            time_in_force: None,
-            iceberg: None,
-            auto_borrow: None,
-        })
-        .map_err(|e| anyhow!(e))?
+        .post("spot/orders")
+        .body(
+            Body::from_json(&SpotOrderParams {
+                text: None,
+                currency_pair: &info.id,
+                order_type: Some("limit".into()),
+                account: Some("spot".into()),
+                side: "sell".into(),
+                amount,
+                price,
+                time_in_force: None,
+                iceberg: None,
+                auto_borrow: None,
+            })
+            .map_err(|e| anyhow!(e))?,
+        )
         .await
         .map_err(|e| anyhow!(e))?
         .body_json()
         .await
         .map_err(|e| anyhow!(e))?;
     println!(
-        "#{} Sell {} {} => {} {} @ {} {}",
+        "#{:#?} Sell {} {} => {} {} @ {} {}",
         order.id, amount, &info.base, total, &info.quote, price, &info.quote
     );
     Ok(())
@@ -309,16 +375,20 @@ async fn sell(client: Client, amount: Decimal, info: CurrencyPair) -> Result<()>
 fn print_help() {
     print_msg(format_args!("{}", "The following keyboard shortcuts are available:"));
     print_msg(format_args!("{}", r#"  - Hit "p" to print current balance"#));
+    print_msg(format_args!("{}", r#"  - Hit "s" to sell all available balance for trading coins"#));
     print_msg(format_args!("{}", r#"  - Hit "h" or "?" to print this help"#));
     print_msg(format_args!("{}", r#"  - Hit Esc or Ctrl-C to quit"#));
 }
 
 fn print_msg(msg: std::fmt::Arguments) {
-    println!("{}\r", msg);
+    // canonical carriage return and line feed
+    let msg = format!("{}", msg).replace('\n', "\r\n");
+    print!("{}\r\n", msg);
 }
 
 fn eprint_msg(msg: std::fmt::Arguments) {
-    eprintln!("{}\r", msg);
+    let msg = format!("{}", msg).replace('\n', "\r\n");
+    eprint!("{}\r\n", msg);
 }
 
 mod terminal {

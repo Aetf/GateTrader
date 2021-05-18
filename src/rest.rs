@@ -57,10 +57,10 @@ pub struct SpotTicker {
     pub quote_volume: Decimal,
     pub high_24h: Decimal,
     pub low_24h: Decimal,
-    pub etf_net_value: Decimal,
-    pub etf_pre_net_value: Decimal,
-    pub etf_pre_timestamp: u64,
-    pub etf_leverage: Decimal,
+    pub etf_net_value: Option<Decimal>,
+    pub etf_pre_net_value: Option<Decimal>,
+    pub etf_pre_timestamp: Option<u64>,
+    pub etf_leverage: Option<Decimal>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -85,7 +85,7 @@ pub struct SpotOrderParams<'a> {
 
 #[derive(Debug, serde::Deserialize)]
 pub struct Order {
-    pub id: String,
+    pub id: Option<String>,
     pub text: Option<String>,
     #[serde(deserialize_with = "crate::utils::de::number_from_string")]
     pub create_time: u64,
