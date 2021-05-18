@@ -10,6 +10,7 @@ use async_tungstenite::tungstenite::Message;
 use futures_util::sink::SinkExt as _;
 use futures_util::stream::StreamExt as _;
 use futures_util::TryStreamExt;
+use structopt::StructOpt;
 use surf::{Client, Url};
 
 use auth::GateIoAuth;
@@ -279,15 +280,30 @@ async fn sell_balance(client: Client, balance: ws::channels::SpotBalance, info: 
     Ok(())
 }
 
+#[derive(Debug, StructOpt)]
+struct Cli {
+    /// gate.io APIv4 key
+    #[structopt(short, long, env)]
+    key: String,
+    /// gate.io APIv4 secret
+    #[structopt(short, long, env, hide_env_values = true)]
+    secret: String,
+    /// currency pair source
+    #[structopt(default_value = "ERG")]
+    src_coin: String,
+    /// currency pair destination
+    #[structopt(default_value = "USDT")]
+    dst_coin: String,
+}
+
 #[async_std::main]
 async fn main() -> Result<()> {
-    let mut trader = Trader::spawn(
-        "b8ffbcfa3e8eafc345ade75f84c4a490",
-        "ced122bd871e07a142265503ff84118737341bc07717c784e9e4d167a2e25699",
-    )
-    .await?;
+    dotenv::dotenv()?;
+    let cli = Cli::from_args();
 
-    trader.trade("ERG", "USDT").await?;
+    let mut trader = Trader::spawn(cli.key, cli.secret).await?;
+
+    trader.trade(cli.src_coin, cli.dst_coin).await?;
 
     trader.run().await?;
 

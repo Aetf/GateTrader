@@ -6,3 +6,4 @@ custom_config.toml
 .idea
 config.toml
 log
+.env
