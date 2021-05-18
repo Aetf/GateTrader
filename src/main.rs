@@ -7,6 +7,7 @@ use async_tungstenite::async_std as async_ws;
 use futures_util::sink::SinkExt as _;
 use futures_util::stream::StreamExt as _;
 use futures_util::TryStreamExt;
+use structopt::clap::AppSettings;
 use structopt::StructOpt;
 use surf::{Client, Url};
 
@@ -238,7 +239,14 @@ async fn sell_balance(client: Client, balance: ws::channels::SpotBalance, info: 
     Ok(())
 }
 
+/// Automatically sell coins on gate.io.
+///
+/// This program will load `.env` file from its working directory.
 #[derive(Debug, StructOpt)]
+#[structopt(
+    setting = AppSettings::UnifiedHelpMessage,
+    setting = AppSettings::ColoredHelp,
+)]
 struct Cli {
     /// gate.io APIv4 key
     #[structopt(short, long, env)]
