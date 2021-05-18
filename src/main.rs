@@ -1,12 +1,9 @@
 #![feature(try_blocks)]
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use anyhow::{anyhow, Context, Result};
 use async_channel::Sender;
 use async_std::task;
-use async_tungstenite::async_std::{self as async_ws};
-use async_tungstenite::tungstenite::Message;
+use async_tungstenite::async_std as async_ws;
 use futures_util::sink::SinkExt as _;
 use futures_util::stream::StreamExt as _;
 use futures_util::TryStreamExt;
@@ -16,28 +13,12 @@ use surf::{Client, Url};
 use auth::GateIoAuth;
 use rest::{CurrencyPair, Order, SpotOrderParams, SpotTicker, SpotTickersParams};
 use ws::channels::SpotBalance;
-use ws::Dispatcher;
+use ws::{Dispatcher, WsRequest};
 
 mod auth;
 mod rest;
 mod utils;
 mod ws;
-
-/// data sent to server by client in ws socket
-enum WsRequest {
-    GateIo {
-        channel: String,
-        event: String,
-        payload: serde_json::Value,
-    },
-    Pong(Vec<u8>),
-}
-
-#[derive(Debug, Eq, PartialEq, serde::Deserialize)]
-struct WsError {
-    code: u64,
-    message: String,
-}
 
 #[derive(Debug)]
 struct Trader {
@@ -75,7 +56,7 @@ impl Trader {
                     while let Some(req) = rx.next().await {
                         counter += 1;
                         let res: Result<()> = try {
-                            let msg = ws_build_message(req, counter, key.clone(), &secret)?;
+                            let msg = ws::ws_build_message(req, counter, key.clone(), &secret)?;
                             ws_write.send(msg).await?;
                         };
                         if let Err(e) = res {
@@ -197,29 +178,6 @@ impl Trader {
         handle.await;
         Ok(())
     }
-}
-
-fn ws_build_message(req: WsRequest, id: u64, key: impl Into<String>, secret: impl AsRef<[u8]>) -> Result<Message> {
-    let time = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-    let msg = match req {
-        WsRequest::GateIo {
-            channel,
-            event,
-            payload,
-        } => {
-            let obj = serde_json::json!({
-                "time": time,
-                "id": id,
-                "channel": channel,
-                "event": event,
-                "payload": payload,
-                "auth": auth::ws_sign(channel, event, time, key, secret),
-            });
-            Message::Text(serde_json::to_string(&obj)?)
-        }
-        WsRequest::Pong(data) => Message::Pong(data),
-    };
-    Ok(msg)
 }
 
 async fn sell_balance(client: Client, balance: ws::channels::SpotBalance, info: CurrencyPair) -> Result<()> {

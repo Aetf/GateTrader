@@ -1,14 +1,13 @@
 use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
 use async_channel::{Receiver, Sender};
 use async_tungstenite::async_std::ConnectStream;
+use async_tungstenite::tungstenite::Message;
 use async_tungstenite::WebSocketStream;
 use futures_util::stream::{self, StreamExt as _};
 use serde::Deserializer;
-
-use crate::WsError;
-use async_tungstenite::tungstenite::Message;
 
 pub mod channels;
 
@@ -140,6 +139,45 @@ impl<'de> serde::Deserialize<'de> for ServerMessage {
             )),
         }
     }
+}
+
+/// data sent to server by client in ws socket
+pub enum WsRequest {
+    GateIo {
+        channel: String,
+        event: String,
+        payload: serde_json::Value,
+    },
+    Pong(Vec<u8>),
+}
+
+#[derive(Debug, Eq, PartialEq, serde::Deserialize)]
+pub struct WsError {
+    code: u64,
+    message: String,
+}
+
+pub fn ws_build_message(req: WsRequest, id: u64, key: impl Into<String>, secret: impl AsRef<[u8]>) -> Result<Message> {
+    let time = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let msg = match req {
+        WsRequest::GateIo {
+            channel,
+            event,
+            payload,
+        } => {
+            let obj = serde_json::json!({
+                "time": time,
+                "id": id,
+                "channel": channel,
+                "event": event,
+                "payload": payload,
+                "auth": crate::auth::ws_sign(channel, event, time, key, secret),
+            });
+            Message::Text(serde_json::to_string(&obj)?)
+        }
+        WsRequest::Pong(data) => Message::Pong(data),
+    };
+    Ok(msg)
 }
 
 #[cfg(test)]
