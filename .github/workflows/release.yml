@@ -86,15 +86,11 @@ jobs:
       - uses: actions/checkout@v2
         with:
           submodules: 'recursive'
-      - name: Install Rust
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          override: true
-          target: ${{ matrix.target }}
+      # rustup show will read the rust-toolchain file and automatically install
+      - name: Setup rust
+        run: rustup show
 
       - name: Use Cross
-        # if: matrix.os != 'windows-2019'
         run: |
           cargo install cross
           echo "CARGO=cross" >> $GITHUB_ENV
@@ -121,7 +117,7 @@ jobs:
           echo "RELEASE_VERSION=$release_version" >> $GITHUB_ENV
           echo "release version: $RELEASE_VERSION"
       - name: Build release binary
-        run: ${{ env.CARGO }} build --verbose --release --features pcre2 ${{ env.TARGET_FLAGS }}
+        run: ${{ env.CARGO }} build --verbose --release ${{ env.TARGET_FLAGS }}
 
       - name: Strip release binary (linux and macos)
         if: matrix.build == 'linux' || matrix.build == 'macos'
