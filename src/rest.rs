@@ -22,7 +22,7 @@ impl Middleware for Logger {
         let elapsed = start_time.elapsed();
 
         print_msg(format_args!(
-            "[OK] request completed: {} {}s",
+            "[OK] request completed: {} {:.2}s",
             status,
             elapsed.as_secs_f64()
         ));

@@ -3,16 +3,20 @@
 use anyhow::{anyhow, Context, Result};
 use async_channel::Sender;
 use async_std::task;
+use async_std::task::JoinHandle;
 use async_tungstenite::async_std as async_ws;
+use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers};
 use futures_util::sink::SinkExt as _;
 use futures_util::stream::StreamExt as _;
 use futures_util::TryStreamExt;
+use rust_decimal::Decimal;
 use structopt::clap::AppSettings;
 use structopt::StructOpt;
 use surf::{Client, Url};
 
 use auth::GateIoAuth;
-use rest::{CurrencyPair, Order, SpotOrderParams, SpotTicker, SpotTickersParams};
+use rest::{CurrencyPair, Order, SpotAccount, SpotOrderParams, SpotTicker, SpotTickersParams};
+use terminal::RawModeGuard;
 use ws::channels::SpotBalance;
 use ws::{Dispatcher, WsRequest};
 
@@ -109,16 +113,15 @@ impl Trader {
         })
     }
 
-    pub async fn handle_keyboard(&mut self) -> Result<RawModeGuard> {
+    pub async fn handle_keyboard(&mut self) -> Result<(RawModeGuard, JoinHandle<()>)> {
         let guard = RawModeGuard::new()?;
-        let reader = EventStream::new();
+        let mut reader = EventStream::new();
         print_help();
 
         let client = self.rest_client.clone();
 
-        let fut = reader.for_each(move |e| {
-            let client = client.clone();
-            async move {
+        let fut = async move {
+            while let Some(e) = reader.next().await {
                 let res: Result<()> = try {
                     match e? {
                         Event::Key(KeyEvent {
@@ -131,25 +134,27 @@ impl Trader {
                             code: KeyCode::Char('p'),
                             ..
                         }) => {
-                            print_balance(client).await?;
+                            print_balance(client.clone()).await?;
                         }
-                        Event::Key(KeyEvent {
-                            code: KeyCode::Char('s'),
-                            ..
-                        }) => {
-                            // TODO: sell balance
-                            todo!();
+                        Event::Key(
+                            KeyEvent { code: KeyCode::Esc, .. }
+                            | KeyEvent {
+                                code: KeyCode::Char('c'),
+                                modifiers: KeyModifiers::CONTROL,
+                            },
+                        ) => {
+                            break;
                         }
-                        _ => Err(anyhow!("Unhandled event"))?,
+                        _ => (),
                     }
                 };
                 if let Err(e) = res {
                     eprint_msg(format_args!("{:?}", e));
                 }
             }
-        });
-        task::spawn(fut);
-        Ok(guard)
+        };
+        let handle = task::spawn(fut);
+        Ok((guard, handle))
     }
 
     /// monitor the spot balance of `src` coin, and sell them out as `dst` coin
@@ -184,7 +189,7 @@ impl Trader {
                     Ok(balances.pop())
                 }
             })
-            .and_then(move |balance| sell_balance(rest_client.clone(), balance, info.clone()))
+            .and_then(move |balance| sell(rest_client.clone(), balance.available, info.clone()))
             .for_each_concurrent(None, |res| async {
                 if let Err(e) = res {
                     eprint_msg(format_args!("{:?}", e));
@@ -216,10 +221,8 @@ impl Trader {
     }
 
     pub async fn run(self) -> Result<()> {
-        let handle = task::spawn(self.dispatcher.run());
         print_msg(format_args!("[OK] gate.io websocket API"));
-
-        handle.await;
+        self.dispatcher.run().await;
         Ok(())
     }
 }
@@ -233,19 +236,22 @@ async fn print_balance(client: Client) -> Result<()> {
         .await
         .map_err(|e| anyhow!(e))?;
     print_msg(format_args!("======================================================"));
-    print_msg(format_args!("Coin | Available | Locked"));
+    print_msg(format_args!("Coin \t| Available \t| Locked"));
     print_msg(format_args!("------------------------------------------------------"));
     for acc in accounts.into_iter() {
-        print_msg(format_args!("{} | {} | {}", acc.currency, acc.available, acc.locked));
+        print_msg(format_args!(
+            "{} \t| {:.8} \t| {:.8}",
+            acc.currency, acc.available, acc.locked
+        ));
     }
     print_msg(format_args!("======================================================"));
     Ok(())
 }
 
-async fn sell_balance(client: Client, balance: ws::channels::SpotBalance, info: CurrencyPair) -> Result<()> {
+async fn sell(client: Client, amount: Decimal, info: CurrencyPair) -> Result<()> {
     // no need to trade if we don't have fund
     if let Some(min_base) = info.min_base_amount {
-        if balance.available < min_base {
+        if amount < min_base {
             return Ok(());
         }
     }
@@ -267,7 +273,7 @@ async fn sell_balance(client: Client, balance: ws::channels::SpotBalance, info: 
     // determine price to place the order
     let price = ticker.highest_bid;
     // place order
-    let total = balance.available * price;
+    let total = amount * price;
     if let Some(min_quote) = info.min_quote_amount {
         if total < min_quote {
             return Ok(());
@@ -281,7 +287,7 @@ async fn sell_balance(client: Client, balance: ws::channels::SpotBalance, info: 
             order_type: Some("limit".into()),
             account: Some("spot".into()),
             side: "sell".into(),
-            amount: balance.available,
+            amount,
             price,
             time_in_force: None,
             iceberg: None,
@@ -295,20 +301,16 @@ async fn sell_balance(client: Client, balance: ws::channels::SpotBalance, info: 
         .map_err(|e| anyhow!(e))?;
     println!(
         "#{} Sell {} {} => {} {} @ {} {}",
-        order.id, balance.available, &info.base, total, &info.quote, price, &info.quote
+        order.id, amount, &info.base, total, &info.quote, price, &info.quote
     );
     Ok(())
 }
 
-const HELP: &str = r#"The following keyboard shortcuts are available:
- - Hit "s" to sell current available balance
- - Hit "p" to print current balance
- - Hit "h" or "?" to print this help
- - Hit Esc or Ctrl-C to quit
-"#;
-
 fn print_help() {
-    print_msg(format_args!("{}", HELP));
+    print_msg(format_args!("{}", "The following keyboard shortcuts are available:"));
+    print_msg(format_args!("{}", r#"  - Hit "p" to print current balance"#));
+    print_msg(format_args!("{}", r#"  - Hit "h" or "?" to print this help"#));
+    print_msg(format_args!("{}", r#"  - Hit Esc or Ctrl-C to quit"#));
 }
 
 fn print_msg(msg: std::fmt::Arguments) {
@@ -340,9 +342,6 @@ mod terminal {
         }
     }
 }
-use crate::rest::SpotAccount;
-use crossterm::event::{Event, EventStream, KeyCode, KeyEvent};
-use terminal::RawModeGuard;
 
 /// Automatically sell coins on gate.io.
 ///
@@ -374,11 +373,15 @@ async fn main() -> Result<()> {
 
     let mut trader = Trader::spawn(cli.key, cli.secret).await?;
 
-    let _guard = trader.handle_keyboard().await?;
+    let (_guard, input) = trader.handle_keyboard().await?;
 
     trader.trade(cli.src_coin, cli.dst_coin).await?;
 
-    trader.run().await?;
+    task::spawn(trader.run());
+
+    input.await;
+
+    print_msg(format_args!("[OK] Bye"));
 
     Ok(())
 }
