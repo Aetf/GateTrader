@@ -2,26 +2,20 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{anyhow, Context, Error, Result};
+use anyhow::{anyhow, Context, Result};
+use async_channel::Sender;
 use async_std::task;
-use async_tungstenite::async_std::{self as async_ws, ConnectStream};
+use async_tungstenite::async_std::{self as async_ws};
 use async_tungstenite::tungstenite::Message;
-use async_tungstenite::WebSocketStream;
-use futures_util::sink::{self, SinkExt as _};
-use futures_util::stream::{self, StreamExt as _};
+use futures_util::sink::SinkExt as _;
+use futures_util::stream::StreamExt as _;
+use futures_util::TryStreamExt;
 use surf::{Client, Url};
 
-use crate::rest::CurrencyPair;
-use crate::ws::channels::SpotBalance;
-use crate::ws::Dispatcher;
-use async_channel::Sender;
 use auth::GateIoAuth;
-use auth::WsAuth;
-use futures_util::TryStreamExt;
-use rust_decimal::Decimal;
-use serde_json::Value;
-use std::sync::atomic::{AtomicU64, Ordering};
-use surf::http::Method;
+use rest::{CurrencyPair, Order, SpotOrderParams, SpotTicker, SpotTickersParams};
+use ws::channels::SpotBalance;
+use ws::Dispatcher;
 
 mod auth;
 mod rest;
@@ -31,11 +25,6 @@ mod ws;
 /// data sent to server by client in ws socket
 enum WsRequest {
     GateIo {
-        channel: String,
-        event: String,
-        payload: serde_json::Value,
-    },
-    GateIoAuth {
         channel: String,
         event: String,
         payload: serde_json::Value,
@@ -88,9 +77,8 @@ impl Trader {
                             let msg = ws_build_message(req, counter, key.clone(), &secret)?;
                             ws_write.send(msg).await?;
                         };
-                        match res {
-                            Err(e) => eprintln!("{:#?}", e),
-                            Ok(_) => (),
+                        if let Err(e) = res {
+                            eprintln!("{:#?}", e)
                         }
                     }
                 }
@@ -104,7 +92,7 @@ impl Trader {
         println!("[ -] gate.io websocket API dispatcher...");
 
         // spawn one task to response to ping
-        let mut ping_rx = dispatcher.subscribe("ping", "");
+        let ping_rx = dispatcher.subscribe("ping", "");
         task::spawn({
             // this instance will be saved in the closure
             let ws_tx = ws_tx.clone();
@@ -146,19 +134,15 @@ impl Trader {
         let rest_client = self.rest_client.clone();
 
         // check basic info about the currency pair
-        let info: rest::CurrencyPair = {
-            let url = Url::parse(&format!("spot/currency_pairs/{}_{}", &src, &dst))?;
-            let req = surf::RequestBuilder::new(Method::Get, url).build();
-            rest_client
-                .send(req)
-                .await
-                .map_err(|e| anyhow!(e))?
-                .body_json()
-                .await
-                .map_err(|e| anyhow!(e))?
-        };
+        let info: rest::CurrencyPair = rest_client
+            .get(format!("spot/currency_pairs/{}_{}", &src, &dst))
+            .await
+            .map_err(|e| anyhow!(e))?
+            .body_json()
+            .await
+            .map_err(|e| anyhow!(e))?;
 
-        let mut rx = self.dispatcher.subscribe("spot.balances", "update");
+        let rx = self.dispatcher.subscribe("spot.balances", "update");
         let fut = rx
             .map(|msg| msg.content.map_err(|e| anyhow!("Got server error: {:#?}", e)))
             .try_filter_map(move |val| {
@@ -180,11 +164,20 @@ impl Trader {
                 }
             });
         task::spawn(fut);
+
+        // now actually enable the notification
+        self.ws_tx
+            .send(WsRequest::GateIo {
+                channel: "spot.balances".to_string(),
+                event: "subscribe".to_string(),
+                payload: Default::default(),
+            })
+            .await?;
         println!("[OK] spot.balances");
         Ok(())
     }
 
-    pub async fn run(mut self) -> Result<()> {
+    pub async fn run(self) -> Result<()> {
         let handle = task::spawn(self.dispatcher.run());
         println!("[OK] gate.io websocket API dispatcher run");
 
@@ -207,20 +200,6 @@ fn ws_build_message(req: WsRequest, id: u64, key: impl Into<String>, secret: imp
                 "channel": channel,
                 "event": event,
                 "payload": payload,
-            });
-            Message::Text(serde_json::to_string(&obj)?)
-        }
-        WsRequest::GateIoAuth {
-            channel,
-            event,
-            payload,
-        } => {
-            let obj = serde_json::json!({
-                "time": time,
-                "id": id,
-                "channel": channel,
-                "event": event,
-                "payload": payload,
                 "auth": auth::ws_sign(channel, event, time, key, secret),
             });
             Message::Text(serde_json::to_string(&obj)?)
@@ -230,15 +209,50 @@ fn ws_build_message(req: WsRequest, id: u64, key: impl Into<String>, secret: imp
     Ok(msg)
 }
 
-async fn sell_balance(_client: Client, balance: ws::channels::SpotBalance, info: CurrencyPair) -> Result<()> {
+async fn sell_balance(client: Client, balance: ws::channels::SpotBalance, info: CurrencyPair) -> Result<()> {
     // no need to trade if we don't have fund
     if balance.available < info.min_base_amount {
         return Ok(());
     }
-    // TODO: get current market price
-    let price: Decimal = todo!();
-    // TODO: place order
-    let total: Decimal = todo!();
+    // get current market price
+    let tickers: Vec<SpotTicker> = client
+        .get("spot/tickers")
+        .query(&SpotTickersParams {
+            currency_pair: &info.id,
+        })
+        .map_err(|e| anyhow!(e))?
+        .await
+        .map_err(|e| anyhow!(e))?
+        .body_json()
+        .await
+        .map_err(|e| anyhow!(e))?;
+    let ticker = tickers
+        .last()
+        .ok_or_else(|| anyhow!("No info about the currency pair"))?;
+    // determine price to place the order
+    let price = ticker.highest_bid;
+    // place order
+    let order: Order = client
+        .get("spot/orders")
+        .query(&SpotOrderParams {
+            text: None,
+            currency_pair: &info.id,
+            order_type: Some("limit".into()),
+            account: Some("spot".into()),
+            side: "sell".into(),
+            amount: balance.available,
+            price,
+            time_in_force: None,
+            iceberg: None,
+            auto_borrow: None,
+        })
+        .map_err(|e| anyhow!(e))?
+        .await
+        .map_err(|e| anyhow!(e))?
+        .body_json()
+        .await
+        .map_err(|e| anyhow!(e))?;
+    let total = order.amount * order.price;
     println!(
         "Sell {} {} => {} {} @ {} {}",
         balance.available, &info.base, total, &info.quote, price, &info.quote

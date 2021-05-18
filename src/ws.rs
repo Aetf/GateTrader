@@ -74,9 +74,8 @@ impl Dispatcher {
                         println!("Unknown message from server: {:#?}", msg);
                     }
                 };
-                match res {
-                    Err(e) => eprintln!("{:#?}", e),
-                    Ok(_) => (),
+                if let Err(e) = res {
+                    eprintln!("{:#?}", e)
                 }
             })
             .await;
@@ -146,7 +145,6 @@ impl<'de> serde::Deserialize<'de> for ServerMessage {
 #[cfg(test)]
 mod test {
     use super::*;
-    use std::str::FromStr;
 
     #[test]
     fn ws_response_de() {

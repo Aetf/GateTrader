@@ -2,7 +2,7 @@ use rust_decimal::Decimal;
 
 #[derive(Debug, Eq, PartialEq, serde::Deserialize)]
 pub struct SpotBalance {
-    #[serde(deserialize_with = "crate::utils::deserialize_number_from_string")]
+    #[serde(deserialize_with = "crate::utils::de::number_from_string")]
     pub timestamp: u64,
     pub currency: String,
     pub change: Decimal,

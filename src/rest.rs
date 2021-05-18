@@ -62,3 +62,70 @@ pub struct CurrencyPair {
     pub sell_start: u64,
     pub buy_start: u64,
 }
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
+pub struct SpotTicker {
+    pub currency_pair: String,
+    pub last: Decimal,
+    pub lowest_ask: Decimal,
+    pub highest_bid: Decimal,
+    pub change_percentage: Decimal,
+    pub base_volume: Decimal,
+    pub quote_volume: Decimal,
+    pub high_24h: Decimal,
+    pub low_24h: Decimal,
+    pub etf_net_value: Decimal,
+    pub etf_pre_net_value: Decimal,
+    pub etf_pre_timestamp: u64,
+    pub etf_leverage: Decimal,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct SpotTickersParams<'a> {
+    pub currency_pair: &'a str,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct SpotOrderParams<'a> {
+    pub text: Option<String>,
+    pub currency_pair: &'a str,
+    #[serde(rename = "type")]
+    pub order_type: Option<String>,
+    pub account: Option<String>,
+    pub side: String,
+    pub amount: Decimal,
+    pub price: Decimal,
+    pub time_in_force: Option<String>,
+    pub iceberg: Option<String>,
+    pub auto_borrow: Option<bool>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct Order {
+    pub id: String,
+    pub text: Option<String>,
+    #[serde(deserialize_with = "crate::utils::de::number_from_string")]
+    pub create_time: u64,
+    #[serde(deserialize_with = "crate::utils::de::number_from_string")]
+    pub update_time: u64,
+    pub status: String,
+    pub currency_pair: String,
+    #[serde(rename = "type")]
+    pub order_type: Option<String>,
+    pub account: Option<String>,
+    pub side: String,
+    pub amount: Decimal,
+    pub price: Decimal,
+    pub time_in_force: Option<String>,
+    pub iceberg: Option<String>,
+    pub auto_borrow: Option<bool>,
+    pub left: Decimal,
+    pub filled_total: Decimal,
+    pub fee: Decimal,
+    pub fee_currency: String,
+    pub point_fee: Decimal,
+    pub gt_fee: Decimal,
+    pub gt_discount: bool,
+    pub rebated_fee: Decimal,
+    pub rebated_fee_currency: String,
+}
