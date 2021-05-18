@@ -1,6 +1,6 @@
 [package]
 name = "gatetrader"
-version = "0.2.0"
+version = "0.1.2"
 authors = ["Aetf <aetf@unlimited-code.works>"]
 repository = "https://github.com/Aetf/gatetrader"
 readme = "README.md"
