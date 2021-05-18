@@ -8,6 +8,41 @@ use sha2::Sha512;
 use surf::middleware::{Middleware, Next};
 use surf::{Body, Client, Error as SurfError, Request, Response, Result as SurfResult};
 
+/// Auth struct for ws auth
+#[derive(Debug, Eq, PartialEq, serde::Serialize)]
+pub struct WsAuth {
+    method: String,
+    #[serde(rename = "KEY")]
+    key: String,
+    #[serde(rename = "SIGN")]
+    sign: String,
+}
+
+/// sign a ws message
+pub fn ws_sign(
+    channel: impl AsRef<[u8]>,
+    event: impl AsRef<[u8]>,
+    time: u64,
+    key: impl Into<String>,
+    secret: impl AsRef<[u8]>,
+) -> WsAuth {
+    let mut mac = Hmac::<Sha512>::new_from_slice(secret.as_ref()).expect("HMAC can take key of any size");
+    mac.update(b"channel=");
+    mac.update(channel.as_ref());
+    mac.update(b"&event=");
+    mac.update(event.as_ref());
+    mac.update(b"&time=");
+    mac.update(time.to_string().as_bytes());
+
+    let sign = hex::encode(mac.finalize().into_bytes());
+    WsAuth {
+        method: "api_key".into(),
+        key: key.into(),
+        sign,
+    }
+}
+
+/// Middleware to add gate.io APIv4 auth headers
 pub struct GateIoAuth {
     key: String,
     secret: Vec<u8>,
