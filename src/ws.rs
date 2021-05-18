@@ -75,7 +75,7 @@ impl Dispatcher {
                     }
                 };
                 if let Err(e) = res {
-                    eprintln!("{:#?}", e)
+                    eprintln!("{:?}", e)
                 }
             })
             .await;

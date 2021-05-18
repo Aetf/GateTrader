@@ -51,10 +51,10 @@ impl Trader {
         let secret = secret.into();
 
         // REST API client is already ARC internally, and can be shared among threads
-        let client = Client::new()
-            .with(rest::BaseUrl::new(Url::parse("https://api.gateio.ws/api/v4/")?))
+        let mut client = Client::new()
             .with(GateIoAuth::new(key.clone(), secret.clone()))
             .with(rest::Logger);
+        client.set_base_url(Url::parse("https://api.gateio.ws/api/v4/")?);
         println!("[OK] gate.io REST API");
 
         // connect websockets
@@ -78,7 +78,7 @@ impl Trader {
                             ws_write.send(msg).await?;
                         };
                         if let Err(e) = res {
-                            eprintln!("{:#?}", e)
+                            eprintln!("{:?}", e)
                         }
                     }
                 }
@@ -112,12 +112,12 @@ impl Trader {
                         }
                     };
                     if let Err(e) = res {
-                        eprintln!("{:#?}", e);
+                        eprintln!("{:?}", e);
                     }
                 }
             })
         });
-        println!("[OK] gate.io websocket API ping pong...");
+        println!("[ -] gate.io websocket API ping pong...");
 
         Ok(Self {
             rest_client: client,
@@ -142,8 +142,9 @@ impl Trader {
             .await
             .map_err(|e| anyhow!(e))?;
 
-        let rx = self.dispatcher.subscribe("spot.balances", "update");
-        let fut = rx
+        let fut = self
+            .dispatcher
+            .subscribe("spot.balances", "update")
             .map(|msg| msg.content.map_err(|e| anyhow!("Got server error: {:#?}", e)))
             .try_filter_map(move |val| {
                 // each async block needs its own copy, because they may run concurrently
@@ -160,12 +161,24 @@ impl Trader {
             .and_then(move |balance| sell_balance(rest_client.clone(), balance, info.clone()))
             .for_each_concurrent(None, |res| async {
                 if let Err(e) = res {
-                    eprintln!("{:#?}", e);
+                    eprintln!("{:?}", e);
+                }
+            });
+        task::spawn(fut);
+        // show the subscribe response only when it's error
+        let fut = self
+            .dispatcher
+            .subscribe("spot.balances", "subscribe")
+            .map(|msg| msg.content.map_err(|e| anyhow!("Got server error: {:#?}", e)))
+            .for_each_concurrent(None, |res| async {
+                match res {
+                    Err(e) => eprintln!("{:?}", e),
+                    Ok(..) => println!("[OK] spot.balances subscribed"),
                 }
             });
         task::spawn(fut);
 
-        // now actually enable the notification
+        // now actually subscribe to the notification on server
         self.ws_tx
             .send(WsRequest::GateIo {
                 channel: "spot.balances".to_string(),
@@ -173,13 +186,12 @@ impl Trader {
                 payload: Default::default(),
             })
             .await?;
-        println!("[OK] spot.balances");
         Ok(())
     }
 
     pub async fn run(self) -> Result<()> {
         let handle = task::spawn(self.dispatcher.run());
-        println!("[OK] gate.io websocket API dispatcher run");
+        println!("[OK] gate.io websocket API");
 
         handle.await;
         Ok(())
@@ -211,8 +223,10 @@ fn ws_build_message(req: WsRequest, id: u64, key: impl Into<String>, secret: imp
 
 async fn sell_balance(client: Client, balance: ws::channels::SpotBalance, info: CurrencyPair) -> Result<()> {
     // no need to trade if we don't have fund
-    if balance.available < info.min_base_amount {
-        return Ok(());
+    if let Some(min_base) = info.min_base_amount {
+        if balance.available < min_base {
+            return Ok(());
+        }
     }
     // get current market price
     let tickers: Vec<SpotTicker> = client
@@ -232,6 +246,12 @@ async fn sell_balance(client: Client, balance: ws::channels::SpotBalance, info: 
     // determine price to place the order
     let price = ticker.highest_bid;
     // place order
+    let total = balance.available * price;
+    if let Some(min_quote) = info.min_quote_amount {
+        if total < min_quote {
+            return Ok(());
+        }
+    }
     let order: Order = client
         .get("spot/orders")
         .query(&SpotOrderParams {
@@ -252,10 +272,9 @@ async fn sell_balance(client: Client, balance: ws::channels::SpotBalance, info: 
         .body_json()
         .await
         .map_err(|e| anyhow!(e))?;
-    let total = order.amount * order.price;
     println!(
-        "Sell {} {} => {} {} @ {} {}",
-        balance.available, &info.base, total, &info.quote, price, &info.quote
+        "#{} Sell {} {} => {} {} @ {} {}",
+        order.id, balance.available, &info.base, total, &info.quote, price, &info.quote
     );
     Ok(())
 }
