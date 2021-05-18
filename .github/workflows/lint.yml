@@ -1,0 +1,33 @@
+name: linter
+
+on: [push, pull_request]
+
+jobs:
+  clippy_check:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+      with:
+        submodules: 'recursive'
+    # rustup show will read the rust-toolchain file and automatically install
+    - name: Setup rust
+      run: rustup show
+    - uses: actions-rs/clippy-check@v1
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        args: --all-features -- --no-deps
+
+  format_check:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+      with:
+        submodules: 'recursive'
+    # rustup show will read the rust-toolchain file and automatically install
+    - name: Setup rust
+      run: rustup show
+    - name: Run cargo fmt
+      uses: actions-rs/cargo@v1
+      with:
+        command: fmt
+        args: -- --check --files-with-diff
