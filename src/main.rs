@@ -273,17 +273,23 @@ async fn sell_all_pairs(client: Client, pairs: Arc<Mutex<Vec<(String, String)>>>
         .await
         .map_err(|e| anyhow!(e))?;
 
-    let pairs = pairs.lock().await;
-    // cross reference the pairs with funds we have
-    let pairs = accounts.into_iter().filter_map(|acc| {
-        pairs
-            .iter()
-            .find(|(src, _)| src == &acc.currency && acc.available > 0.into())
-            .map(|(src, dst)| (src, dst, acc.available))
-    });
-    let mut infos = stream::iter(pairs)
-        .then(|(src, dst, amount)| {
-            let url = format!("spot/currency_pairs/{}_{}", src, dst);
+    let pairs: Vec<_> = {
+        let pairs = pairs.lock().await;
+        // cross reference the pairs with funds we have
+        // we format the url as owned String so we can drop the lock early
+        accounts
+            .into_iter()
+            .filter_map(|acc| {
+                pairs
+                    .iter()
+                    .find(|(src, _)| src == &acc.currency && acc.available > 0.into())
+                    .map(|(src, dst)| (format!("spot/currency_pairs/{}_{}", src, dst), acc.available))
+            })
+            .collect()
+    };
+    // for each viable pair, pull latest info
+    stream::iter(pairs.into_iter())
+        .then(|(url, amount)| {
             let client = client.clone();
             async move {
                 let res: Result<_> = try {
@@ -299,12 +305,8 @@ async fn sell_all_pairs(client: Client, pairs: Arc<Mutex<Vec<(String, String)>>>
                 res
             }
         })
-        .boxed();
-
-    for pair in infos.next().await {
-        let (amount, info) = pair?;
-        sell(client.clone(), amount, info).await?;
-    }
+        .try_for_each(|(amount, info)| sell(client.clone(), amount, info))
+        .await?;
 
     Ok(())
 }
@@ -375,7 +377,10 @@ async fn sell(client: Client, amount: Decimal, info: CurrencyPair) -> Result<()>
 fn print_help() {
     print_msg(format_args!("{}", "The following keyboard shortcuts are available:"));
     print_msg(format_args!("{}", r#"  - Hit "p" to print current balance"#));
-    print_msg(format_args!("{}", r#"  - Hit "s" to sell all available balance for trading coins"#));
+    print_msg(format_args!(
+        "{}",
+        r#"  - Hit "s" to sell all available balance for trading coins"#
+    ));
     print_msg(format_args!("{}", r#"  - Hit "h" or "?" to print this help"#));
     print_msg(format_args!("{}", r#"  - Hit Esc or Ctrl-C to quit"#));
 }
