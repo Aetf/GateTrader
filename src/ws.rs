@@ -9,6 +9,8 @@ use async_tungstenite::WebSocketStream;
 use futures_util::stream::{self, StreamExt as _};
 use serde::Deserializer;
 
+use crate::{eprint_msg, print_msg};
+
 pub mod channels;
 
 #[derive(Debug)]
@@ -70,11 +72,11 @@ impl Dispatcher {
                     if let Some(tx) = subscribers.get(&msg.which) {
                         tx.send(msg).await?;
                     } else {
-                        println!("Unknown message from server: {:#?}", msg);
+                        print_msg(format_args!("Unknown message from server: {:#?}", msg));
                     }
                 };
                 if let Err(e) = res {
-                    eprintln!("{:?}", e)
+                    eprint_msg(format_args!("{:?}", e))
                 }
             })
             .await;

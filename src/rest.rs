@@ -4,6 +4,8 @@ use rust_decimal::Decimal;
 use surf::middleware::{Middleware, Next};
 use surf::{Client, Request, Response, Result as SurfResult};
 
+use crate::print_msg;
+
 pub struct Logger;
 
 #[surf::utils::async_trait]
@@ -12,14 +14,18 @@ impl Middleware for Logger {
         let start_time = time::Instant::now();
         let uri = format!("{}", req.url());
         let method = format!("{}", req.method());
-        println!("sending request: {} {}", method, uri);
+        print_msg(format_args!("[ -] {} {}", method, uri));
 
         let res = next.run(req, client).await?;
 
         let status = res.status();
         let elapsed = start_time.elapsed();
 
-        println!("request completed: {} {}s", status, elapsed.as_secs_f64());
+        print_msg(format_args!(
+            "[OK] request completed: {} {}s",
+            status,
+            elapsed.as_secs_f64()
+        ));
 
         Ok(res)
     }
@@ -105,4 +111,11 @@ pub struct Order {
     pub gt_discount: bool,
     pub rebated_fee: Decimal,
     pub rebated_fee_currency: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct SpotAccount {
+    pub currency: String,
+    pub available: Decimal,
+    pub locked: Decimal,
 }

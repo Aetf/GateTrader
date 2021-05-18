@@ -7,6 +7,37 @@
 
 Automatically sell coins on gate.io
 
+```
+gatetrader 0.1.0
+Automatically sell coins on gate.io.
+
+This program will load `.env` file from its working directory.
+
+USAGE:
+    gatetrader --key <key> --secret <secret> [ARGS]
+
+OPTIONS:
+    -h, --help
+            Prints help information
+
+    -k, --key <key>
+            gate.io APIv4 key [env: KEY=b8ffbcfa3e8eafc345ade75f84c4a490]
+
+    -s, --secret <secret>
+            gate.io APIv4 secret [env: SECRET]
+
+    -V, --version
+            Prints version information
+
+
+ARGS:
+    <src-coin>
+            currency pair source [default: ERG]
+
+    <dst-coin>
+            currency pair destination [default: USDT]
+```
+
 ## License
 
 Licensed under either of

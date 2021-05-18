@@ -38,12 +38,12 @@ impl Trader {
             .with(GateIoAuth::new(key.clone(), secret.clone()))
             .with(rest::Logger);
         client.set_base_url(Url::parse("https://api.gateio.ws/api/v4/")?);
-        println!("[OK] gate.io REST API");
+        print_msg(format_args!("[OK] gate.io REST API"));
 
         // connect websockets
         let (ws, _) = async_ws::connect_async("wss://api.gateio.ws/ws/v4/").await?;
         let (mut ws_write, ws_read) = ws.split();
-        println!("[ -] gate.io websocket API connection...");
+        print_msg(format_args!("[ -] gate.io websocket API connection..."));
 
         // spawn one task for websocket API sending, taking messages from a queue, so any tasks/threads can send
         // message
@@ -61,18 +61,18 @@ impl Trader {
                             ws_write.send(msg).await?;
                         };
                         if let Err(e) = res {
-                            eprintln!("{:?}", e)
+                            eprint_msg(format_args!("{:?}", e))
                         }
                     }
                 }
             });
             ws_tx
         };
-        println!("[ -] gate.io websocket API sender...");
+        print_msg(format_args!("[ -] gate.io websocket API sender..."));
 
         // spawn one task to dispatch received ws messages
         let mut dispatcher = ws::Dispatcher::new(ws_read);
-        println!("[ -] gate.io websocket API dispatcher...");
+        print_msg(format_args!("[ -] gate.io websocket API dispatcher..."));
 
         // spawn one task to response to ping
         let ping_rx = dispatcher.subscribe("ping", "");
@@ -90,23 +90,66 @@ impl Trader {
                                 ws_tx.send(WsRequest::Pong(data)).await?;
                             }
                             Err(e) => {
-                                eprintln!("Got server error: {:#?}", e);
+                                eprint_msg(format_args!("Got server error: {:#?}", e));
                             }
                         }
                     };
                     if let Err(e) = res {
-                        eprintln!("{:?}", e);
+                        eprint_msg(format_args!("{:?}", e));
                     }
                 }
             })
         });
-        println!("[ -] gate.io websocket API ping pong...");
+        print_msg(format_args!("[ -] gate.io websocket API ping pong..."));
 
         Ok(Self {
             rest_client: client,
             ws_tx,
             dispatcher,
         })
+    }
+
+    pub async fn handle_keyboard(&mut self) -> Result<RawModeGuard> {
+        let guard = RawModeGuard::new()?;
+        let reader = EventStream::new();
+        print_help();
+
+        let client = self.rest_client.clone();
+
+        let fut = reader.for_each(move |e| {
+            let client = client.clone();
+            async move {
+                let res: Result<()> = try {
+                    match e? {
+                        Event::Key(KeyEvent {
+                            code: KeyCode::Char('?' | 'h'),
+                            ..
+                        }) => {
+                            print_help();
+                        }
+                        Event::Key(KeyEvent {
+                            code: KeyCode::Char('p'),
+                            ..
+                        }) => {
+                            print_balance(client).await?;
+                        }
+                        Event::Key(KeyEvent {
+                            code: KeyCode::Char('s'),
+                            ..
+                        }) => {
+                            // TODO: sell balance
+                            todo!();
+                        }
+                        _ => Err(anyhow!("Unhandled event"))?,
+                    }
+                };
+                if let Err(e) = res {
+                    eprint_msg(format_args!("{:?}", e));
+                }
+            }
+        });
+        task::spawn(fut);
+        Ok(guard)
     }
 
     /// monitor the spot balance of `src` coin, and sell them out as `dst` coin
@@ -144,7 +187,7 @@ impl Trader {
             .and_then(move |balance| sell_balance(rest_client.clone(), balance, info.clone()))
             .for_each_concurrent(None, |res| async {
                 if let Err(e) = res {
-                    eprintln!("{:?}", e);
+                    eprint_msg(format_args!("{:?}", e));
                 }
             });
         task::spawn(fut);
@@ -155,8 +198,8 @@ impl Trader {
             .map(|msg| msg.content.map_err(|e| anyhow!("Got server error: {:#?}", e)))
             .for_each_concurrent(None, |res| async {
                 match res {
-                    Err(e) => eprintln!("{:?}", e),
-                    Ok(..) => println!("[OK] spot.balances subscribed"),
+                    Err(e) => eprint_msg(format_args!("{:?}", e)),
+                    Ok(..) => print_msg(format_args!("[OK] spot.balances subscribed")),
                 }
             });
         task::spawn(fut);
@@ -174,11 +217,29 @@ impl Trader {
 
     pub async fn run(self) -> Result<()> {
         let handle = task::spawn(self.dispatcher.run());
-        println!("[OK] gate.io websocket API");
+        print_msg(format_args!("[OK] gate.io websocket API"));
 
         handle.await;
         Ok(())
     }
+}
+
+async fn print_balance(client: Client) -> Result<()> {
+    let accounts: Vec<SpotAccount> = client
+        .get("spot/accounts")
+        .await
+        .map_err(|e| anyhow!(e))?
+        .body_json()
+        .await
+        .map_err(|e| anyhow!(e))?;
+    print_msg(format_args!("======================================================"));
+    print_msg(format_args!("Coin | Available | Locked"));
+    print_msg(format_args!("------------------------------------------------------"));
+    for acc in accounts.into_iter() {
+        print_msg(format_args!("{} | {} | {}", acc.currency, acc.available, acc.locked));
+    }
+    print_msg(format_args!("======================================================"));
+    Ok(())
 }
 
 async fn sell_balance(client: Client, balance: ws::channels::SpotBalance, info: CurrencyPair) -> Result<()> {
@@ -239,6 +300,50 @@ async fn sell_balance(client: Client, balance: ws::channels::SpotBalance, info: 
     Ok(())
 }
 
+const HELP: &str = r#"The following keyboard shortcuts are available:
+ - Hit "s" to sell current available balance
+ - Hit "p" to print current balance
+ - Hit "h" or "?" to print this help
+ - Hit Esc or Ctrl-C to quit
+"#;
+
+fn print_help() {
+    print_msg(format_args!("{}", HELP));
+}
+
+fn print_msg(msg: std::fmt::Arguments) {
+    println!("{}\r", msg);
+}
+
+fn eprint_msg(msg: std::fmt::Arguments) {
+    eprintln!("{}\r", msg);
+}
+
+mod terminal {
+    use anyhow::Result;
+    use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+
+    pub struct RawModeGuard {
+        _private: (),
+    }
+
+    impl RawModeGuard {
+        pub fn new() -> Result<Self> {
+            enable_raw_mode()?;
+            Ok(Self { _private: () })
+        }
+    }
+
+    impl Drop for RawModeGuard {
+        fn drop(&mut self) {
+            disable_raw_mode().expect("Unable to disable raw mode");
+        }
+    }
+}
+use crate::rest::SpotAccount;
+use crossterm::event::{Event, EventStream, KeyCode, KeyEvent};
+use terminal::RawModeGuard;
+
 /// Automatically sell coins on gate.io.
 ///
 /// This program will load `.env` file from its working directory.
@@ -268,6 +373,8 @@ async fn main() -> Result<()> {
     let cli = Cli::from_args();
 
     let mut trader = Trader::spawn(cli.key, cli.secret).await?;
+
+    let _guard = trader.handle_keyboard().await?;
 
     trader.trade(cli.src_coin, cli.dst_coin).await?;
 
