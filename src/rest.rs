@@ -48,7 +48,7 @@ impl Middleware for BaseUrl {
     }
 }
 
-#[derive(Debug, Eq, PartialEq, serde::Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
 pub struct CurrencyPair {
     pub id: String,
     pub base: String,

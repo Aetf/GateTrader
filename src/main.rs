@@ -17,6 +17,7 @@ use crate::ws::Dispatcher;
 use async_channel::Sender;
 use auth::GateIoAuth;
 use auth::WsAuth;
+use futures_util::TryStreamExt;
 use rust_decimal::Decimal;
 use serde_json::Value;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -59,7 +60,8 @@ impl Trader {
     pub async fn spawn(key: impl Into<String>, secret: impl Into<String>) -> Result<Self> {
         let key = key.into();
         let secret = secret.into();
-        // spawn one task for REST API sending, taking requests from a queue
+
+        // REST API client is already ARC internally, and can be shared among threads
         let client = Client::new()
             .with(rest::BaseUrl::new(Url::parse("https://api.gateio.ws/api/v4/")?))
             .with(GateIoAuth::new(key.clone(), secret.clone()))
@@ -71,7 +73,8 @@ impl Trader {
         let (mut ws_write, ws_read) = ws.split();
         println!("[ -] gate.io websocket API connection...");
 
-        // spawn one task for websocket API sending, taking messages from a queue
+        // spawn one task for websocket API sending, taking messages from a queue, so any tasks/threads can send
+        // message
         let ws_tx = {
             let (ws_tx, mut rx) = async_channel::unbounded::<WsRequest>();
             task::spawn({
@@ -103,15 +106,17 @@ impl Trader {
         // spawn one task to response to ping
         let mut ping_rx = dispatcher.subscribe("ping", "");
         task::spawn({
-            // take our own ws_tx
+            // this instance will be saved in the closure
             let ws_tx = ws_tx.clone();
-            async move {
-                while let Some(msg) = ping_rx.next().await {
+            ping_rx.for_each_concurrent(None, move |msg| {
+                // this instance will be saved in the async block
+                let ws_tx = ws_tx.clone();
+                async move {
                     let res: Result<()> = try {
                         match msg.content {
                             Ok(val) => {
                                 let data = serde_json::from_value(val).context("deserialize ping data from json")?;
-                                ws_tx.send(WsRequest::Pong(data));
+                                ws_tx.send(WsRequest::Pong(data)).await?;
                             }
                             Err(e) => {
                                 eprintln!("Got server error: {:#?}", e);
@@ -122,7 +127,7 @@ impl Trader {
                         eprintln!("{:#?}", e);
                     }
                 }
-            }
+            })
         });
         println!("[OK] gate.io websocket API ping pong...");
 
@@ -154,31 +159,27 @@ impl Trader {
         };
 
         let mut rx = self.dispatcher.subscribe("spot.balances", "update");
-        task::spawn(async move {
-            while let Some(msg) = rx.next().await {
-                let res: Result<()> = try {
-                    match msg.content {
-                        Ok(val) => {
-                            let balances: Vec<SpotBalance> =
-                                serde_json::from_value(val).context("Response is invalid")?;
-                            // we only interested in one specific coin
-                            let mut balances: Vec<_> = balances.into_iter().filter(|b| b.currency == src).collect();
-                            // only need the latest one
-                            balances.sort_unstable_by_key(|b| b.timestamp);
-                            if let Some(balance) = balances.pop() {
-                                sell_balance(&rest_client, balance, &info).await?;
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("Got server error: {:#?}", e);
-                        }
-                    }
-                };
+        let fut = rx
+            .map(|msg| msg.content.map_err(|e| anyhow!("Got server error: {:#?}", e)))
+            .try_filter_map(move |val| {
+                // each async block needs its own copy, because they may run concurrently
+                let src = src.clone();
+                async move {
+                    let balances: Vec<SpotBalance> = serde_json::from_value(val).context("Response is invalid")?;
+                    // we only interested in one specific coin,
+                    let mut balances: Vec<_> = balances.into_iter().filter(|b| b.currency == src).collect();
+                    // only need the latest one
+                    balances.sort_unstable_by_key(|b| b.timestamp);
+                    Ok(balances.pop())
+                }
+            })
+            .and_then(move |balance| sell_balance(rest_client.clone(), balance, info.clone()))
+            .for_each_concurrent(None, |res| async {
                 if let Err(e) = res {
                     eprintln!("{:#?}", e);
                 }
-            }
-        });
+            });
+        task::spawn(fut);
         println!("[OK] spot.balances");
         Ok(())
     }
@@ -229,22 +230,18 @@ fn ws_build_message(req: WsRequest, id: u64, key: impl Into<String>, secret: imp
     Ok(msg)
 }
 
-async fn sell_balance(_client: &Client, balance: ws::channels::SpotBalance, info: &CurrencyPair) -> Result<()> {
+async fn sell_balance(_client: Client, balance: ws::channels::SpotBalance, info: CurrencyPair) -> Result<()> {
     // no need to trade if we don't have fund
     if balance.available < info.min_base_amount {
         return Ok(());
     }
     // TODO: get current market price
+    let price: Decimal = todo!();
     // TODO: place order
-    let price = todo!();
+    let total: Decimal = todo!();
     println!(
         "Sell {} {} => {} {} @ {} {}",
-        balance.available,
-        &info.base,
-        todo!(),
-        &info.quote,
-        price,
-        &info.quote
+        balance.available, &info.base, total, &info.quote, price, &info.quote
     );
     Ok(())
 }
