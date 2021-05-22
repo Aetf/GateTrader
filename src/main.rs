@@ -368,8 +368,14 @@ async fn sell(client: Client, amount: Decimal, info: CurrencyPair) -> Result<()>
         .await
         .map_err(|e| anyhow!(e))?;
     println!(
-        "#{:#?} Sell {} {} => {} {} @ {} {}",
-        order.id, amount, &info.base, total, &info.quote, price, &info.quote
+        "#{} Sell {} {} => {} {} @ {} {}",
+        order.id.as_deref().unwrap_or("?"),
+        amount,
+        &info.base,
+        total,
+        &info.quote,
+        price,
+        &info.quote
     );
     Ok(())
 }
