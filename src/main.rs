@@ -129,7 +129,6 @@ impl Trader {
             .map(|msg| msg.content.map_err(|e| anyhow!("Got server error: {:#?}", e)))
             .try_filter_map(move |val| {
                 // each async block needs its own copy, because they may run concurrently
-                // todo: revisit this, may not need clone
                 let src = src.clone();
                 async move {
                     let balances: Vec<SpotBalance> = serde_json::from_value(val).context("Response is invalid")?;
