@@ -1,15 +1,13 @@
 #![feature(try_blocks)]
+#![deny(unused_must_use)]
 
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
-use async_channel::Sender;
 use async_std::task;
 use async_std::task::JoinHandle;
-use async_tungstenite::async_std as async_ws;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers};
 use futures_util::lock::Mutex;
-use futures_util::sink::SinkExt as _;
 use futures_util::stream::{self, StreamExt as _};
 use futures_util::TryStreamExt;
 use rust_decimal::Decimal;
@@ -17,11 +15,11 @@ use structopt::clap::AppSettings;
 use structopt::StructOpt;
 use surf::{Body, Client, Url};
 
-use auth::GateIoAuth;
-use rest::{CurrencyPair, Order, SpotAccount, SpotOrderParams, SpotTicker, SpotTickersParams};
-use terminal::RawModeGuard;
-use ws::channels::SpotBalance;
-use ws::{Dispatcher, WsRequest};
+use crate::auth::GateIoAuth;
+use crate::rest::{CurrencyPair, Order, SpotAccount, SpotOrderParams, SpotTicker, SpotTickersParams};
+use crate::terminal::RawModeGuard;
+use crate::ws::channels::SpotBalance;
+use crate::ws::WsClient;
 
 mod auth;
 mod rest;
@@ -30,9 +28,8 @@ mod ws;
 
 #[derive(Debug)]
 struct Trader {
-    ws_tx: Sender<WsRequest>,
+    ws_client: WsClient,
     rest_client: Client,
-    dispatcher: Dispatcher,
     trading_pairs: Arc<Mutex<Vec<(String, String)>>>,
 }
 
@@ -48,72 +45,11 @@ impl Trader {
         client.set_base_url(Url::parse("https://api.gateio.ws/api/v4/")?);
         print_msg(format_args!("[OK] gate.io REST API"));
 
-        // connect websockets
-        let (ws, _) = async_ws::connect_async("wss://api.gateio.ws/ws/v4/").await?;
-        let (mut ws_write, ws_read) = ws.split();
-        print_msg(format_args!("[ -] gate.io websocket API connection..."));
-
-        // spawn one task for websocket API sending, taking messages from a queue, so any tasks/threads can send
-        // message
-        let ws_tx = {
-            let (ws_tx, mut rx) = async_channel::unbounded::<WsRequest>();
-            task::spawn({
-                async move {
-                    let key = key;
-                    let secret = secret;
-                    let mut counter = 0;
-                    while let Some(req) = rx.next().await {
-                        counter += 1;
-                        let res: Result<()> = try {
-                            let msg = ws::ws_build_message(req, counter, key.clone(), &secret)?;
-                            ws_write.send(msg).await?;
-                        };
-                        if let Err(e) = res {
-                            eprint_msg(format_args!("{:?}", e))
-                        }
-                    }
-                }
-            });
-            ws_tx
-        };
-        print_msg(format_args!("[ -] gate.io websocket API sender..."));
-
-        // spawn one task to dispatch received ws messages
-        let mut dispatcher = ws::Dispatcher::new(ws_read);
-        print_msg(format_args!("[ -] gate.io websocket API dispatcher..."));
-
-        // spawn one task to response to ping
-        let ping_rx = dispatcher.subscribe("ping", "");
-        task::spawn({
-            // this instance will be saved in the closure
-            let ws_tx = ws_tx.clone();
-            ping_rx.for_each_concurrent(None, move |msg| {
-                // this instance will be saved in the async block
-                let ws_tx = ws_tx.clone();
-                async move {
-                    let res: Result<()> = try {
-                        match msg.content {
-                            Ok(val) => {
-                                let data = serde_json::from_value(val).context("deserialize ping data from json")?;
-                                ws_tx.send(WsRequest::Pong(data)).await?;
-                            }
-                            Err(e) => {
-                                eprint_msg(format_args!("Got server error: {:#?}", e));
-                            }
-                        }
-                    };
-                    if let Err(e) = res {
-                        eprint_msg(format_args!("{:?}", e));
-                    }
-                }
-            })
-        });
-        print_msg(format_args!("[ -] gate.io websocket API ping pong..."));
+        let ws_client = WsClient::new(key, secret);
 
         Ok(Self {
             rest_client: client,
-            ws_tx,
-            dispatcher,
+            ws_client,
             trading_pairs: Arc::new(Mutex::new(vec![])),
         })
     }
@@ -188,11 +124,12 @@ impl Trader {
             .map_err(|e| anyhow!(e))?;
 
         let fut = self
-            .dispatcher
+            .ws_client
             .subscribe("spot.balances", "update")
             .map(|msg| msg.content.map_err(|e| anyhow!("Got server error: {:#?}", e)))
             .try_filter_map(move |val| {
                 // each async block needs its own copy, because they may run concurrently
+                // todo: revisit this, may not need clone
                 let src = src.clone();
                 async move {
                     let balances: Vec<SpotBalance> = serde_json::from_value(val).context("Response is invalid")?;
@@ -212,7 +149,7 @@ impl Trader {
         task::spawn(fut);
         // show the subscribe response only when it's error
         let fut = self
-            .dispatcher
+            .ws_client
             .subscribe("spot.balances", "subscribe")
             .map(|msg| msg.content.map_err(|e| anyhow!("Got server error: {:#?}", e)))
             .for_each_concurrent(None, |res| async {
@@ -223,21 +160,11 @@ impl Trader {
             });
         task::spawn(fut);
 
-        // now actually subscribe to the notification on server
-        self.ws_tx
-            .send(WsRequest::GateIo {
-                channel: "spot.balances".to_string(),
-                event: "subscribe".to_string(),
-                payload: Default::default(),
-            })
-            .await?;
-
         Ok(())
     }
 
     pub async fn run(self) -> Result<()> {
-        print_msg(format_args!("[OK] gate.io websocket API"));
-        self.dispatcher.run().await;
+        self.ws_client.run_forever().await?;
         Ok(())
     }
 }
